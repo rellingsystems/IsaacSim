@@ -190,6 +190,19 @@ def export_one(entry: dict) -> dict:
     if destination.exists():
         destination = destination.with_name(f"{destination.name}_attempt_{time.time_ns()}")
     destination.mkdir(parents=True, exist_ok=False)
+    license_sources = []
+    for directory in source.parents:
+        notices = [
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.name.upper().startswith(("LICENSE", "COPYING", "NOTICE"))
+        ]
+        if notices:
+            (destination / "notices").mkdir()
+            for notice in notices:
+                shutil.copy2(notice, destination / "notices" / notice.name)
+                license_sources.append(str(notice))
+            break
     input_path, changes, source_summary = prepare_source(source, destination)
     importer = MJCFImporter(
         MJCFImporterConfig(
@@ -239,6 +252,7 @@ def export_one(entry: dict) -> dict:
         "resource_reference_count": len(changes),
         "source_model_summary": source_summary,
         "selected_physics_variant": variants.GetVariantSelection(),
+        "notice_sources": license_sources,
     }
     del prims, stage, layers, importer
     gc.collect()
