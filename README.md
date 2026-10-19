@@ -107,6 +107,46 @@ pushing. Keep upstream workflows disabled unless runner labels and secrets have
 been reviewed for the fork; this bootstrap does not register Stallion as a
 GitHub Actions runner.
 
+### Existing MuJoCo catalogs
+
+Physics and rendering run on Stallion. Headless jobs create no desktop window;
+the bootstrap has not configured a viewer or streaming connection to the Mac.
+
+`tools/relling/catalog.py` inventories explicit source paths and exports model
+candidates with the built MJCF importer. Run it on Stallion from this checkout:
+
+```bash
+python3 tools/relling/catalog.py plan --paths /absolute/path/to/xml-paths.txt \
+  --source-base /home/stallion --output _relling_catalogs/my-catalog
+python3 tools/relling/catalog.py run --manifest _relling_catalogs/my-catalog/manifest.json
+python3 tools/relling/catalog.py status --manifest _relling_catalogs/my-catalog/manifest.json
+```
+
+The private catalogs are `_relling_catalogs/2026-10-19-v1` (Stallion sources,
+including Menagerie and LIBERO copies) and `2026-10-19-mac-v2` (newer Mac source
+snapshot). Their `catalog.json` files record every source, output USD, error,
+fragment, and pending conversion. Generated catalogs and source snapshots are
+ignored by Git and are not published in this public fork.
+
+Original sources are read only. The helper prepares derived MJCF with resolved
+resource paths and converts legacy MSH meshes using MuJoCo's bundled converter.
+It retains source XML hashes, nearby license notices, and importer artifacts.
+Each USD must contain composed geometry and local dependencies; physics variants
+are selected explicitly, with collision and articulated-joint presence checked
+against the compiled source. Floating-root free joints are represented by rigid
+bodies rather than requiring an articulated joint. Workers run serially with a
+ten-minute chunk deadline and a 40 GiB free-disk floor. Use `--retry-failed` to
+archive failed records and retry; previous asset directories remain intact.
+
+`run --audit` rechecks prior exports and creates a sibling `.isaac-*.usda`
+entry layer with an explicit physics selection, preserving the original root
+layer. Audit records overlay export records in `catalog.json`. This checks USD
+composition and physics schemas; it does not establish equivalent dynamics.
+XML fragments, missing resources, invalid source definitions, and application
+templates requiring runtime assembly remain recorded separately. Python tasks,
+controllers, rewards, policies, and physical robot execution need their own port
+and validation.
+
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://docs.python.org/3/whatsnew/3.12.html)
 [![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
 [![Linux aarch64 platform](https://img.shields.io/badge/platform-linux--aarch64-orange.svg)](https://docs.nvidia.com/dgx/dgx-os-7-user-guide/introduction.html)

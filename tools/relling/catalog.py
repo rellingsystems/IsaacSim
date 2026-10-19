@@ -175,6 +175,7 @@ def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], d
     source_summary = {
         "bodies": model.nbody,
         "joints": model.njnt,
+        "articulated_joints": int((model.jnt_type != mujoco.mjtJoint.mjJNT_FREE).sum()),
         "dofs": model.nv,
         "geometry": model.ngeom,
         "collision_geometry": int(((model.geom_contype | model.geom_conaffinity) != 0).sum()),
@@ -206,7 +207,7 @@ def validate_stage(usd_path: Path, destination: Path, source_summary: dict) -> d
         raise RuntimeError("Imported stage contains no geometry")
     joint_count = sum(prim.IsA(UsdPhysics.Joint) for prim in prims)
     collision_count = sum(prim.HasAPI(UsdPhysics.CollisionAPI) for prim in prims)
-    if source_summary["joints"] and not joint_count:
+    if source_summary.get("articulated_joints", source_summary["joints"]) and not joint_count:
         raise RuntimeError("Source has joints but exported physics stage has none")
     if source_summary.get("collision_geometry", 0) and not collision_count:
         raise RuntimeError("Source has collision geometry but exported physics stage has none")
@@ -237,6 +238,7 @@ def audit_one(entry: dict, output: Path) -> dict:
     shutil.copy2(source, target)
     model = mujoco.MjModel.from_xml_path(result["prepared_source"])
     summary = dict(result["source_model_summary"])
+    summary["articulated_joints"] = int((model.jnt_type != mujoco.mjtJoint.mjJNT_FREE).sum())
     summary["collision_geometry"] = int(((model.geom_contype | model.geom_conaffinity) != 0).sum())
     return {
         "status": "exported",
