@@ -147,6 +147,29 @@ templates requiring runtime assembly remain recorded separately. Python tasks,
 controllers, rewards, policies, and physical robot execution need their own port
 and validation.
 
+The 2026-10-19 pass inventoried 736 XML sources: 603 USD exports, 85 standalone
+conversion failures, and 48 fragments. Twenty additional compiled MJB study
+snapshots and their metadata were copied separately and verified against their
+source SHA-256 hashes. MJB snapshots are preserved archives, not USD exports.
+Two Relling scenes each passed a headless 60-step/four-render smoke on GPU 0;
+both processes exited successfully and their final logs contained no errors.
+Evidence is under `_relling_runs/1792435529632074972-catalog-smoke/`.
+
+```bash
+cd _build/linux-x86_64/release
+bash ../../../tools/relling/python.sh --no-ros-env ../../../tools/relling/scene_smoke.py \
+  --scene /absolute/path/from/catalog.json --output /absolute/path/to/new-result.json
+```
+
+Inspect the process exit and native log alongside the scene smoke's finite-pose
+result. This is an initialization, stepping, and rendering check without task
+controllers. The conversion helper normalizes attached-model default names when
+MuJoCo's serialized defaults cannot be reloaded, checking compiled parameters
+within XML precision. Derived USD entry layers disable redundant fixed joints
+between non-dynamic actors, including world-to-kinematic mocap markers rejected
+by PhysX. These corrections leave the original MJCF and importer payloads intact;
+the index records the derived entry layer and any disabled constraints.
+
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://docs.python.org/3/whatsnew/3.12.html)
 [![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
 [![Linux aarch64 platform](https://img.shields.io/badge/platform-linux--aarch64-orange.svg)](https://docs.nvidia.com/dgx/dgx-os-7-user-guide/introduction.html)
