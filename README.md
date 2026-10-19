@@ -109,8 +109,41 @@ GitHub Actions runner.
 
 ### Existing MuJoCo catalogs
 
-Physics and rendering run on Stallion. Headless jobs create no desktop window;
-the bootstrap has not configured a viewer or streaming connection to the Mac.
+Physics and rendering run on Stallion. Headless batch jobs create no desktop
+window. The private interactive viewer below streams the full Isaac Sim UI to
+a Mac browser.
+
+### Private interactive streaming
+
+`tools/relling/stream.py` starts a detached full-UI WebRTC session from the built
+runtime, opens an exported USD in a new writable session layer, adds lighting,
+and leaves simulation stopped. It records its PID, log, source and session USD
+under `_relling_runs/`. Closing the browser leaves the server running. Each start
+creates a fresh session; save edits before stopping, and reopen a saved session
+explicitly with `--scene` to retain them.
+
+```bash
+python3 tools/relling/stream.py start --scene /absolute/path/to/scene.usda --ip YOUR_TAILSCALE_IP
+python3 tools/relling/stream.py status
+python3 tools/relling/stream.py stop
+python3 tools/relling/stream.py start  # reuses the last source and Tailscale IP
+```
+
+The host must already be connected to Tailscale. The helper installs the narrow
+`tools/relling/stream_guard.nft` filter if absent (requires passwordless `sudo nft`).
+It accepts the native signaling TCP 49100 and media UDP 47998 ports only through
+loopback or `tailscale0`; other host traffic is unchanged. The guard is checked
+on every start, including after reboot. The Python control endpoint stays on
+127.0.0.1:8226 and is reached through SSH. Do not expose these ports publicly.
+
+For the Mac client, use NVIDIA's official `@nvidia/create-ov-web-rtc-app@2.1.5`
+`local-sample` React template, as pinned by `tools/docker/web-viewer/Dockerfile`.
+Set its `signalingServer` and `mediaServer` to the host's Tailscale address,
+`signalingPort` to 49100, `mediaPort` to 47998, `cursor` to `hardware`, and
+`forceWSS` to false. Build with
+`npm install --ignore-scripts` and `npm run build`; serve `dist` on Mac loopback
+port 8210. Keep both machines connected to Tailscale. One client controls a
+session; refresh the browser after restarting the server.
 
 `tools/relling/catalog.py` inventories explicit source paths and exports model
 candidates with the built MJCF importer. Run it on Stallion from this checkout:

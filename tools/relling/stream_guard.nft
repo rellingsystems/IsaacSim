@@ -1,0 +1,8 @@
+# Restrict only the native WebRTC ports. Leave all other host traffic unchanged.
+table inet relling_isaac_stream {
+    chain ingress {
+        type filter hook input priority -10; policy accept;
+        iifname != "tailscale0" iifname != "lo" tcp dport 49100 drop
+        iifname != "tailscale0" iifname != "lo" udp dport 47998 drop
+    }
+}
