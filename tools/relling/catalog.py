@@ -128,6 +128,7 @@ def resolve_resource(source: Path, directory: str, filename: str) -> Path:
 def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], dict]:
     """Serialize a derived MJCF with absolute resources and supported legacy mesh files."""
     import mujoco
+    import numpy as np
     from mujoco import msh2obj
 
     prepared = destination / "prepared"
@@ -183,7 +184,63 @@ def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], d
         "cameras": model.ncam,
     }
     result = prepared / source.name
-    result.write_text(spec.to_xml())
+    serialized = spec.to_xml()
+    tree = ET.fromstring(serialized)
+    if any(not node.get("class") for node in tree.findall(".//default/default")):
+        # Attached models can serialize an unnamed nested default that MuJoCo cannot reload.
+        # Rename default objects through their references; leave body/joint/geometry names intact.
+        defaults = {spec.default}
+        for group in (
+            "bodies",
+            "geoms",
+            "joints",
+            "sites",
+            "actuators",
+            "cameras",
+            "lights",
+            "meshes",
+            "materials",
+            "pairs",
+            "equalities",
+            "tendons",
+        ):
+            for element in getattr(spec, group, []):
+                default = getattr(element, "classname", None)
+                if default is not None and default not in defaults:
+                    defaults.add(default)
+                    default.name = f"relling_import_default_{len(defaults)}"
+        spec.compile()
+        serialized = spec.to_xml()
+        roundtrip = mujoco.MjSpec.from_string(serialized).compile()
+        for parameter in (
+            "body_pos",
+            "body_quat",
+            "body_mass",
+            "body_inertia",
+            "geom_type",
+            "geom_size",
+            "geom_pos",
+            "geom_quat",
+            "geom_contype",
+            "geom_conaffinity",
+            "jnt_type",
+            "jnt_range",
+            "actuator_gainprm",
+            "actuator_biasprm",
+        ):
+            np.testing.assert_allclose(
+                getattr(model, parameter), getattr(roundtrip, parameter), rtol=1e-5, atol=1e-6, err_msg=parameter
+            )
+        changes.append(
+            {
+                "kind": "attached_default_serialization",
+                "default_objects": len(defaults),
+                "check": "Compiled geometry, mass, inertia, joints and actuator parameters matched within XML precision",
+                "relative_tolerance": 1e-5,
+                "absolute_tolerance": 1e-6,
+            }
+        )
+    result.write_text(serialized)
     write_json(prepared / "resource-references.json", changes)
     return result, changes, source_summary
 
