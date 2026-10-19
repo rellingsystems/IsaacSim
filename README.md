@@ -184,6 +184,27 @@ checks all imported body poses against MuJoCo, and frames the complete cell.
 Subsequent starts reuse both source and home snapshots. This is an explicit
 snapshot, so later changes in the source branch require a new export.
 
+`tools/relling/motion.py` can reuse the selected robot-research checkout's
+`Planner.plan_path` against this frozen source snapshot. Supply an explicit JSON
+run in that planner's waypoint format (`name`, `waypoints`, `offset_m` or
+`pos_m`, and `quat_wxyz`). A passing run must return home; the adapter audits
+every edge at half the study's joint sampling interval before writing a preview.
+
+```bash
+PYTHONPATH=/path/to/robot-research-worktree /path/to/shared/venv/bin/python \
+  tools/relling/motion.py plan --worktree /path/to/robot-research-worktree \
+  --snapshot /path/to/source-snapshot --run /path/to/run.json --output /path/to/new-run
+python3 tools/relling/motion.py preview --trajectory /path/to/new-run/trajectory.json --repeats 2
+python3 tools/relling/motion.py stop
+```
+
+Preview verifies the active source and home pose, replays MuJoCo body transforms
+with the Isaac timeline stopped, checks USD pose readback, and restores home on
+completion or cancellation. This is a kinematic planning preview: it does not
+validate PhysX tracking, timing, velocity/acceleration limits, cutting forces,
+or hardware execution. Each run retains its request, planner revision, settings,
+collision audit, trajectory, and preview result.
+
 Original sources are read only. The helper prepares derived MJCF with resolved
 resource paths and converts legacy MSH meshes using MuJoCo's bundled converter.
 It retains source XML hashes, nearby license notices, and importer artifacts.
