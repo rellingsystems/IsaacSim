@@ -17,6 +17,15 @@ GPU execution. A public binary installation does not validate changes to this
 fork. Do not treat the platform as GPU-verified until a Stallion run produces
 a passing `acceptance.json` and its associated `physics.json`.
 
+Validated on Stallion on 2026-10-19: Ubuntu 24.04.4, RTX 4090 (24 GiB), driver
+580.178.04, and GCC 11. The release source build passed in 1661 seconds. The
+headless smoke at commit `7713f3ca3db33e31a941633a2f81a95a0a250898` passed
+240 physics steps and eight render calls; the cube settled at 0.25 m. The warm
+run reported app ready at 7.04 seconds and exited successfully. Evidence is in
+Stallion's `_relling_runs/1792429042852699778-build/` and
+`_relling_runs/1792431126764803077-smoke/`. This is a smoke result, not a
+performance benchmark or validation of GUI, ROS, robot, or sensor workflows.
+
 ```bash
 ssh stallion
 mkdir -p ~/src/relling
