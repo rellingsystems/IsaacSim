@@ -40,8 +40,9 @@ def check_host(action: str, gpu: int) -> dict:
     if platform.system() == "Linux":
         memory = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines())
         report["available_ram_gib"] = round(int(memory["MemAvailable"].split()[0]) / 1024**2, 1)
-        if report["available_ram_gib"] < 16:
-            errors.append("Insufficient available RAM: reserve 16 GiB and use two build jobs on a 32 GiB host.")
+        required_ram = 8 if action == "smoke" else 16
+        if report["available_ram_gib"] < required_ram:
+            errors.append(f"Insufficient available RAM: reserve {required_ram} GiB for {action}.")
     commands = {
         "git": ["git", "--version"],
         "git_lfs": ["git", "lfs", "version"],

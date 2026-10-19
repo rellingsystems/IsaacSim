@@ -35,7 +35,8 @@ python3 tools/relling/dev.py preflight
 
 Preflight inventories the selected GPU, driver, compiler, free RAM, and disk.
 It requires GCC/G++ 11, Git LFS, an idle GPU with at least 16 GiB VRAM, 16 GiB
-available RAM, and a conservative 100 GiB free build reserve. The default is
+available RAM for building (8 GiB for the lightweight smoke), and a conservative
+100 GiB free build reserve. The default is
 two build jobs so Stallion's 32 GiB RAM can also support its existing services.
 These checks are readiness gates; they do not replace NVIDIA's RTX and driver
 compatibility requirements below. Install missing host prerequisites using the
