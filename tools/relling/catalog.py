@@ -101,6 +101,75 @@ def plan(args: argparse.Namespace) -> None:
     )
 
 
+def resolve_resource(source: Path, directory: str, filename: str) -> Path:
+    """Resolve an existing reference; relocate stale leading-parent paths only when unique."""
+    reference = Path(directory) / filename
+    normal = (source.parent / reference).resolve()
+    if normal.is_file():
+        return normal
+    parts = list(reference.parts)
+    while parts and parts[0] in ("..", "."):
+        parts.pop(0)
+    candidates = {(parent / Path(*parts)).resolve() for parent in source.parents}
+    existing = [path for path in candidates if path.is_file()]
+    if len(existing) != 1:
+        raise FileNotFoundError(f"Resource {reference} has {len(existing)} unambiguous relocation candidates")
+    return existing[0]
+
+
+def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict]]:
+    """Serialize a derived MJCF with absolute resources and supported legacy mesh files."""
+    import mujoco
+    from mujoco import msh2obj
+
+    prepared = destination / "prepared"
+    prepared.mkdir()
+    spec = mujoco.MjSpec.from_file(str(source))
+    changes = []
+    for mesh in spec.meshes:
+        if not mesh.file:
+            continue
+        original = mesh.file
+        resource = resolve_resource(source, mesh.compiler.meshdir, original)
+        if resource.suffix.lower() == ".msh":
+            output = prepared / f"{digest(resource)[:20]}.obj"
+            if not output.exists():
+                data = msh2obj.Msh.create(resource)
+                text = msh2obj.msh_to_obj(resource)
+                # MuJoCo's bundled writer incorrectly references absent UV/normal arrays.
+                lines = []
+                for line in text.splitlines():
+                    if line.startswith("f "):
+                        fields = []
+                        for item in line.split()[1:]:
+                            vertex, uv, normal = item.split("/")
+                            fields.append(
+                                vertex
+                                + (
+                                    ("/" + (uv if data.vertex_texcoords.size else "") + "/" + normal)
+                                    if data.vertex_normals.size
+                                    else ("/" + uv if data.vertex_texcoords.size else "")
+                                )
+                            )
+                        line = "f " + " ".join(fields)
+                    lines.append(line)
+                output.write_text("\n".join(lines) + "\n")
+            resource = output
+            mesh.content_type = "model/obj"
+        mesh.file = str(resource)
+        changes.append({"kind": "mesh", "original": original, "resolved": str(resource)})
+    for texture in spec.textures:
+        if texture.file:
+            original = texture.file
+            texture.file = str(resolve_resource(source, texture.compiler.texturedir, original))
+            changes.append({"kind": "texture", "original": original, "resolved": texture.file})
+    spec.compile()
+    result = prepared / source.name
+    result.write_text(spec.to_xml())
+    write_json(prepared / "resource-references.json", changes)
+    return result, changes
+
+
 def export_one(entry: dict) -> dict:
     """Convert one source without overrides and verify a nonempty, portable USD stage."""
     from isaacsim.asset.importer.mjcf import MJCFImporter, MJCFImporterConfig
@@ -110,10 +179,13 @@ def export_one(entry: dict) -> dict:
     if digest(source) != entry["sha256"]:
         raise RuntimeError("Source XML changed after inventory")
     destination = Path(entry["output"])
+    if destination.exists():
+        destination = destination.with_name(f"{destination.name}_attempt_{time.time_ns()}")
     destination.mkdir(parents=True, exist_ok=False)
+    input_path, changes = prepare_source(source, destination)
     importer = MJCFImporter(
         MJCFImporterConfig(
-            mjcf_path=str(source),
+            mjcf_path=str(input_path),
             usd_path=str(destination),
             import_scene=True,
             fix_base=None,
@@ -148,6 +220,8 @@ def export_one(entry: dict) -> dict:
         "source_sha256": entry["sha256"],
         "physics_equivalence": "not_tested",
         "controller_port": "not_performed",
+        "prepared_source": str(input_path),
+        "resource_reference_count": len(changes),
     }
     del prims, stage, layers, importer
     gc.collect()
@@ -213,6 +287,15 @@ def run(args: argparse.Namespace, manifest: dict) -> None:
     output = Path(manifest["output_root"])
     (output / "results").mkdir(exist_ok=True)
     (output / "logs").mkdir(exist_ok=True)
+    if args.retry_failed:
+        history = output / "results" / "history"
+        history.mkdir(exist_ok=True)
+        for record in (output / "results").glob("*.json"):
+            result = json.loads(record.read_text())
+            if result.get("status") == "failed" and (
+                not args.match or any(term in result["source"] for term in args.match)
+            ):
+                record.replace(history / f"{record.stem}-{time.time_ns()}.json")
     pending = [
         entry
         for entry in manifest["entries"]
@@ -310,6 +393,7 @@ def main() -> None:
             command.add_argument("--limit", type=int)
             command.add_argument("--chunk-size", type=int, default=10)
             command.add_argument("--timeout", type=int, default=600)
+            command.add_argument("--retry-failed", action="store_true")
         elif name == "worker":
             command.add_argument("--ids", nargs="+", required=True)
     args = parser.parse_args()
