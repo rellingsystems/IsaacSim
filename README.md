@@ -24,6 +24,12 @@ cd ~/src/relling
 git clone --branch relling/dev https://github.com/rellingsystems/IsaacSim.git
 cd IsaacSim
 git remote add upstream https://github.com/isaac-sim/IsaacSim.git
+# GCC 11 is installed alongside the host compiler. Select it for this shell.
+mkdir -p _relling_toolchain/bin
+ln -sf /usr/bin/gcc-11 _relling_toolchain/bin/gcc
+ln -sf /usr/bin/g++-11 _relling_toolchain/bin/g++
+export PATH="$PWD/_relling_toolchain/bin:$PATH"
+export CC=gcc CXX=g++
 python3 tools/relling/dev.py preflight
 ```
 
