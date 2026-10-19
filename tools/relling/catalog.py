@@ -110,13 +110,18 @@ def resolve_resource(source: Path, directory: str, filename: str) -> Path:
     parts = list(reference.parts)
     while parts and parts[0] in ("..", "."):
         parts.pop(0)
-    candidates = {(parent / Path(*parts)).resolve() for parent in source.parents}
+    parents = list(source.parents)
+    snapshots = ROOT / "_relling_source_snapshots"
+    if source.is_relative_to(snapshots):
+        snapshot = snapshots / source.relative_to(snapshots).parts[0]
+        parents = [parent for parent in parents if parent.is_relative_to(snapshot)]
+    candidates = {(parent / Path(*parts)).resolve() for parent in parents}
     existing = [path for path in candidates if path.is_file()]
     if not existing:
         # Retain at least a directory and filename when relocating author-machine paths.
         for offset in range(1, len(parts) - 1):
             suffix = Path(*parts[offset:])
-            candidates = {(parent / suffix).resolve() for parent in source.parents}
+            candidates = {(parent / suffix).resolve() for parent in parents}
             existing = [path for path in candidates if path.is_file()]
             if existing:
                 break
