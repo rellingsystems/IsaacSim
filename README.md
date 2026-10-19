@@ -3,6 +3,79 @@
 ---
 # Isaac Sim
 
+## Relling development platform
+
+The Relling fork lives at <https://github.com/rellingsystems/IsaacSim>. Develop on
+`relling/dev`; keep `upstream` pointed at <https://github.com/isaac-sim/IsaacSim>.
+The initial baseline is upstream `main` at
+`7c206f75bdadd9e05fc457f19863ca4c3f0cb693` (6.1.0 GA; the upstream `VERSION`
+file reads `6.1.0-rc.26`). Upstream's default `develop` branch is newer; update
+the baseline deliberately and repeat the smoke test after an upgrade.
+
+Use the Mac for editing and Stallion for native Linux x86_64 source builds and
+GPU execution. A public binary installation does not validate changes to this
+fork. Do not treat the platform as GPU-verified until a Stallion run produces
+a passing `acceptance.json` and its associated `physics.json`.
+
+```bash
+ssh stallion
+mkdir -p ~/src/relling
+cd ~/src/relling
+git clone --branch relling/dev https://github.com/rellingsystems/IsaacSim.git
+cd IsaacSim
+git remote add upstream https://github.com/isaac-sim/IsaacSim.git
+python3 tools/relling/dev.py preflight
+```
+
+Preflight inventories the selected GPU, driver, compiler, free RAM, and disk.
+It requires GCC/G++ 11, Git LFS, an idle GPU with at least 16 GiB VRAM, 16 GiB
+available RAM, and a conservative 100 GiB free build reserve. The default is
+two build jobs so Stallion's 32 GiB RAM can also support its existing services.
+These checks are readiness gates; they do not replace NVIDIA's RTX and driver
+compatibility requirements below. Install missing host prerequisites using the
+upstream instructions. Use a private compiler PATH shim if changing the
+machine-wide compiler would affect other projects. No host packages, drivers,
+Docker settings, or system compiler alternatives are changed by our helper.
+
+```bash
+# Review NVIDIA's terms interactively; the helper never accepts them for you.
+./tools/eula_check.sh
+python3 tools/relling/dev.py build --jobs 2
+python3 tools/relling/dev.py smoke --gpu 0
+
+# Interactive GUI when a desktop session is available:
+./_build/linux-x86_64/release/isaac-sim.sh
+```
+
+Build uses the upstream external source-build path (`--no-docker --release`)
+and pulls Git LFS assets. Smoke launches the built checkout headlessly, requests
+single-GPU PhysX, renders eight frames, and requires a procedural 0.5 m cube
+to fall from 2 m and settle at 0.25 m on a floor over 240 physics steps. It does
+not require remote robot assets. This proves basic initialization and physics;
+robot controllers, cameras, ROS, streaming, and performance require separate
+tests. A GPU request alone does not prove that the engine avoided CPU fallback;
+inspect `smoke.log` alongside the result before making that claim.
+
+Each build or smoke attempt gets a fresh `_relling_runs/<id>-<action>/` with
+host inventory, source commit and dirty status, logs, an active PID file, and
+`acceptance.json`. Existing runs are never overwritten. The build deadline is
+three hours; smoke has a ten-minute deadline including first-start shader work.
+The helper kills the process group on timeout. Watch logs from a second SSH
+session while it runs; it writes acceptance only after the process exits.
+Run IDs and runtime data stay out of Git. GPU jobs already using more than
+2 GiB VRAM or 20% utilization block the helper; coordinate with their owner.
+
+For development, edit under `source/`, repeat the release build, and rerun smoke.
+Keep custom simulation scripts under `tools/relling/` initially. Use Onshape and
+editable FeatureScript for custom CAD; preserve supplied vendor CAD and import
+exports into simulation without changing the CAD source of truth.
+
+To update the fork, fetch `upstream`, merge the desired upstream release into
+`relling/dev`, resolve conflicts, then repeat preflight, build, and smoke before
+pushing. Keep upstream workflows disabled unless runner labels and secrets have
+been reviewed for the fork; this bootstrap does not register Stallion as a
+GitHub Actions runner.
+
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://docs.python.org/3/whatsnew/3.12.html)
 [![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
 [![Linux aarch64 platform](https://img.shields.io/badge/platform-linux--aarch64-orange.svg)](https://docs.nvidia.com/dgx/dgx-os-7-user-guide/introduction.html)
