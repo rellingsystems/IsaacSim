@@ -70,6 +70,7 @@ def main() -> None:
         subprocess.run(guard + ["-f", rules], check=True)
     for port in (49100, 8226):
         with socket.socket() as check:
+            check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             check.bind(("127.0.0.1", port))
     build = ROOT / "_build/linux-x86_64/release"
     libraries = sorted((build / "exts/isaacsim.pip.nv/pip_prebundle/nvidia").glob("*/lib"))
