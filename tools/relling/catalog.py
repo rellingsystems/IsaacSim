@@ -262,6 +262,9 @@ def export_one(entry: dict) -> dict:
     destination.mkdir(parents=True, exist_ok=False)
     license_sources = []
     for directory in source.parents:
+        # Source snapshots live under this checkout; its code license does not license source assets.
+        if directory == ROOT:
+            break
         notices = [
             path
             for path in directory.iterdir()
