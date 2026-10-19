@@ -34,6 +34,187 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def serialize_spec(spec, model, changes: list) -> str:
+    """Serialize attached specs while preserving the compiled model across default renaming."""
+    import mujoco
+    import numpy as np
+
+    serialized = spec.to_xml()
+    tree = ET.fromstring(serialized)
+    for key in tree.findall("keyframe/key"):
+        if key.get("name"):
+            key.set("qpos", " ".join(format(float(value), ".17g") for value in model.key(key.get("name")).qpos))
+    serialized = ET.tostring(tree, encoding="unicode")
+    classes = [node.get("class") for node in tree.findall(".//default/default")]
+    if any(not name for name in classes) or len(classes) != len(set(classes)):
+
+        def signature(node):
+            return node.tag, sorted(node.attrib.items()), tuple(signature(child) for child in node)
+
+        seen = {}
+        duplicates = 0
+        for parent in list(tree.iter("default")):
+            for node in list(parent.findall("default")):
+                name = node.get("class")
+                if not name:
+                    continue
+                identity = signature(node)
+                if name in seen:
+                    if seen[name] != identity:
+                        raise ValueError(f"Attached default {name!r} has conflicting definitions")
+                    parent.remove(node)
+                    duplicates += 1
+                else:
+                    seen[name] = identity
+        names = {node.get("class") for node in tree.findall(".//default")}
+        defaults = [node for node in tree.findall(".//default/default") if not node.get("class")]
+        for index, node in enumerate(defaults):
+            name = f"relling_import_default_{index}"
+            while name in names:
+                name += "_"
+            node.set("class", name)
+            names.add(name)
+        serialized = ET.tostring(tree, encoding="unicode")
+        roundtrip = mujoco.MjSpec.from_string(serialized).compile()
+        for parameter in (
+            "body_pos",
+            "body_quat",
+            "body_mass",
+            "body_inertia",
+            "geom_type",
+            "geom_size",
+            "geom_pos",
+            "geom_quat",
+            "geom_contype",
+            "geom_conaffinity",
+            "geom_rgba",
+            "geom_friction",
+            "geom_group",
+            "qpos0",
+            "jnt_type",
+            "jnt_range",
+            "actuator_gainprm",
+            "actuator_biasprm",
+        ):
+            np.testing.assert_allclose(
+                getattr(model, parameter), getattr(roundtrip, parameter), rtol=1e-5, atol=1e-6, err_msg=parameter
+            )
+        for index in range(model.nkey):
+            name = model.key(index).name
+            if name:
+                np.testing.assert_allclose(
+                    model.key(index).qpos, roundtrip.key(name).qpos, rtol=1e-5, atol=1e-6, err_msg=f"keyframe {name}"
+                )
+        changes.append(
+            {
+                "kind": "attached_default_serialization",
+                "default_objects": len(defaults),
+                "deduplicated_identical_defaults": duplicates,
+                "check": "Compiled geometry, mass, inertia, joints and actuator parameters matched within XML precision",
+                "relative_tolerance": 1e-5,
+                "absolute_tolerance": 1e-6,
+            }
+        )
+    return serialized
+
+
+def giza_source(args: argparse.Namespace) -> None:
+    """Snapshot the canonical Giza composition and its home pose for the existing USD pipeline."""
+    import dataclasses
+
+    import mujoco
+    import numpy as np
+
+    worktree = args.worktree.resolve()
+    revision = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+    patch = subprocess.check_output(["git", "-C", str(worktree), "diff", "HEAD", "--binary"])
+    sys.path.insert(0, str(worktree))
+    from giza.cell import compose, robot_profile
+    from giza.study import load_study
+
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    study = load_study(worktree / args.study)
+    spec, robot = compose(study.cell, study.swaps)
+    robot_xml = worktree / robot_profile(study.cell).mujoco.xml
+    model = spec.compile()
+    resources = output / "resources"
+    resources.mkdir()
+    changes = []
+    for elements, directory_name in ((spec.meshes, "meshdir"), (spec.textures, "texturedir")):
+        for element in elements:
+            if not element.file:
+                continue
+            original = element.file
+            directory = getattr(element.compiler, directory_name)
+            candidates = [original, str(Path(directory) / original)]
+            payload = next((spec.assets[key] for key in candidates if key in spec.assets), None)
+            if payload is None:
+                candidates = {(context / directory / original).resolve() for context in (worktree, robot_xml.parent)}
+                existing = [path for path in candidates if path.is_file()]
+                if len(existing) != 1:
+                    raise FileNotFoundError(f"Composed resource {original}: {len(existing)} source-context matches")
+                payload = existing[0].read_bytes()
+            if isinstance(payload, str):
+                payload = payload.encode()
+            identity = hashlib.sha256(payload).hexdigest()
+            target = resources / f"{identity}{Path(original).suffix}"
+            if not target.exists():
+                target.write_bytes(payload)
+            element.file = str(target)
+            changes.append({"original": original, "path": str(target), "sha256": identity})
+    spec.compile()
+    source = output / "scene.xml"
+    (output / "composed-original.xml").write_text(spec.to_xml())
+    source.write_text(serialize_spec(spec, model, changes))
+    restored = mujoco.MjModel.from_xml_path(str(source))
+    data = mujoco.MjData(model)
+    mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+    mujoco.mj_forward(model, data)
+    check = mujoco.MjData(restored)
+    mujoco.mj_resetDataKeyframe(restored, check, restored.key("home").id)
+    mujoco.mj_forward(restored, check)
+    np.testing.assert_allclose(data.geom_xpos, check.geom_xpos, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(data.geom_xmat, check.geom_xmat, rtol=0, atol=1e-6)
+    home = {
+        "joints": {model.joint(i).name: float(data.qpos[model.jnt_qposadr[i]]) for i in range(model.njnt)},
+        "bodies": {
+            model.body(i).name: {"position": data.xpos[i].tolist(), "quaternion": data.xquat[i].tolist()}
+            for i in range(1, model.nbody)
+        },
+    }
+    write_json(output / "home.json", home)
+    final_revision = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+    final_patch = subprocess.check_output(["git", "-C", str(worktree), "diff", "HEAD", "--binary"])
+    if final_revision != revision or final_patch != patch:
+        raise RuntimeError("Source worktree changed during composition; retry into a fresh snapshot directory")
+    status = subprocess.check_output(["git", "-C", str(worktree), "status", "--porcelain"], text=True)
+    provenance = {
+        "worktree": str(worktree),
+        "commit": revision,
+        "worktree_status": status,
+        "source_patch_sha256": hashlib.sha256(patch).hexdigest(),
+        "study": str(study.path),
+        "resolved_study": dataclasses.asdict(study),
+        "robot": dataclasses.asdict(robot),
+        "source": str(source),
+        "source_sha256": digest(source),
+        "geometry_count": model.ngeom,
+        "body_count": model.nbody,
+        "joint_count": model.njnt,
+        "resource_references": changes,
+        "roundtrip_max_position_error_m": float(np.max(np.abs(data.geom_xpos - check.geom_xpos))),
+        "roundtrip_max_rotation_matrix_error": float(np.max(np.abs(data.geom_xmat - check.geom_xmat))),
+    }
+    # Resolved dataclasses contain Paths; make provenance JSON portable.
+    write_json(output / "provenance.json", json.loads(json.dumps(provenance, default=str)))
+    print(
+        json.dumps(
+            {k: v for k, v in provenance.items() if k not in ("resolved_study", "resource_references")}, indent=2
+        )
+    )
+
+
 def plan(args: argparse.Namespace) -> None:
     """Classify every supplied path without loading a simulator or changing sources."""
     output = args.output.resolve()
@@ -133,7 +314,6 @@ def resolve_resource(source: Path, directory: str, filename: str) -> Path:
 def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], dict]:
     """Serialize a derived MJCF with absolute resources and supported legacy mesh files."""
     import mujoco
-    import numpy as np
     from mujoco import msh2obj
 
     prepared = destination / "prepared"
@@ -194,63 +374,7 @@ def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], d
         "cameras": model.ncam,
     }
     result = prepared / source.name
-    serialized = spec.to_xml()
-    tree = ET.fromstring(serialized)
-    if any(not node.get("class") for node in tree.findall(".//default/default")):
-        # Attached models can serialize an unnamed nested default that MuJoCo cannot reload.
-        # Rename default objects through their references; leave body/joint/geometry names intact.
-        defaults = {spec.default}
-        for group in (
-            "bodies",
-            "geoms",
-            "joints",
-            "sites",
-            "actuators",
-            "cameras",
-            "lights",
-            "meshes",
-            "materials",
-            "pairs",
-            "equalities",
-            "tendons",
-        ):
-            for element in getattr(spec, group, []):
-                default = getattr(element, "classname", None)
-                if default is not None and default not in defaults:
-                    defaults.add(default)
-                    default.name = f"relling_import_default_{len(defaults)}"
-        spec.compile()
-        serialized = spec.to_xml()
-        roundtrip = mujoco.MjSpec.from_string(serialized).compile()
-        for parameter in (
-            "body_pos",
-            "body_quat",
-            "body_mass",
-            "body_inertia",
-            "geom_type",
-            "geom_size",
-            "geom_pos",
-            "geom_quat",
-            "geom_contype",
-            "geom_conaffinity",
-            "jnt_type",
-            "jnt_range",
-            "actuator_gainprm",
-            "actuator_biasprm",
-        ):
-            np.testing.assert_allclose(
-                getattr(model, parameter), getattr(roundtrip, parameter), rtol=1e-5, atol=1e-6, err_msg=parameter
-            )
-        changes.append(
-            {
-                "kind": "attached_default_serialization",
-                "default_objects": len(defaults),
-                "check": "Compiled geometry, mass, inertia, joints and actuator parameters matched within XML precision",
-                "relative_tolerance": 1e-5,
-                "absolute_tolerance": 1e-6,
-            }
-        )
-    result.write_text(serialized)
+    result.write_text(serialize_spec(spec, model, changes))
     write_json(prepared / "resource-references.json", changes)
     return result, changes, source_summary
 
@@ -584,6 +708,10 @@ def main() -> None:
     """Dispatch planning, supervised conversion, or a private worker."""
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="action", required=True)
+    composer = commands.add_parser("giza-source")
+    composer.add_argument("--worktree", type=Path, required=True)
+    composer.add_argument("--study", type=Path, required=True)
+    composer.add_argument("--output", type=Path, required=True)
     planner = commands.add_parser("plan")
     planner.add_argument("--paths", type=Path, required=True)
     planner.add_argument("--source-base", type=Path, required=True)
@@ -603,7 +731,9 @@ def main() -> None:
         elif name == "worker":
             command.add_argument("--ids", nargs="+", required=True)
     args = parser.parse_args()
-    if args.action == "plan":
+    if args.action == "giza-source":
+        giza_source(args)
+    elif args.action == "plan":
         plan(args)
     else:
         manifest = json.loads(args.manifest.read_text())

@@ -161,6 +161,29 @@ snapshot). Their `catalog.json` files record every source, output USD, error,
 fragment, and pending conversion. Generated catalogs and source snapshots are
 ignored by Git and are not published in this public fork.
 
+Generated Giza cells must be composed from their study and pinned packages;
+the older standalone deburr XML does not represent the current workcell.
+Run the source snapshot command with the selected robot-research worktree's
+existing Python environment and `PYTHONPATH` pointing to that worktree:
+
+```bash
+PYTHONPATH=/path/to/robot-research-worktree /path/to/shared/venv/bin/python \
+  tools/relling/catalog.py giza-source --worktree /path/to/robot-research-worktree \
+  --study config/studies/my-study.yaml --output _relling_source_snapshots/my-study
+```
+
+This calls Giza's existing composition API, materializes its referenced mesh
+bytes, preserves named home keyframes, and verifies the MJCF round trip against
+the compiled MuJoCo model. The snapshot includes source revision, study, package
+pins, resource hashes, and `home.json`; a changing worktree aborts the snapshot.
+Feed its `scene.xml` through `plan` and `run` as above. Start the exported USD
+with `stream.py start --scene /path/to/scene.usda --home /path/to/home.json
+--ip YOUR_TAILSCALE_IP`. The viewer copies MuJoCo's verified home body transforms
+and joint states into its writable session layer,
+checks all imported body poses against MuJoCo, and frames the complete cell.
+Subsequent starts reuse both source and home snapshots. This is an explicit
+snapshot, so later changes in the source branch require a new export.
+
 Original sources are read only. The helper prepares derived MJCF with resolved
 resource paths and converts legacy MSH meshes using MuJoCo's bundled converter.
 It retains source XML hashes, nearby license notices, and importer artifacts.

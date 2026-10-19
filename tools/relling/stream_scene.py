@@ -5,9 +5,83 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import traceback
 from pathlib import Path
+
+
+def apply_home(stage, home_path: Path) -> dict:
+    """Transfer the verified source pose into the writable viewer layer."""
+    import numpy as np
+    import usdex.core
+    from pxr import Gf, PhysxSchema, Usd, UsdGeom, UsdPhysics
+
+    home = json.loads(home_path.read_text())
+    root = stage.GetDefaultPrim()
+    joints = {
+        stage.GetPrimAtPath(target).GetName(): str(target)
+        for target in root.GetRelationship("isaac:physics:robotJoints").GetTargets()
+    }
+    values = {}
+    for name, value in home["joints"].items():
+        identifier = usdex.core.getValidPrimName(name)
+        if identifier not in joints:
+            raise ValueError(f"Home joint {name!r} is missing from the imported robot")
+        prim = stage.GetPrimAtPath(joints[identifier])
+        if prim.IsA(UsdPhysics.RevoluteJoint):
+            axis, native = "angular", math.degrees(value)
+        elif prim.IsA(UsdPhysics.PrismaticJoint):
+            axis, native = "linear", value
+        else:
+            raise ValueError(f"Unsupported home joint type: {name!r}")
+        PhysxSchema.JointStateAPI.Apply(prim, axis).CreatePositionAttr(native)
+        drive = UsdPhysics.DriveAPI(prim, axis)
+        if drive:
+            drive.CreateTargetPositionAttr(native)
+        values[joints[identifier]] = value
+    links = {
+        stage.GetPrimAtPath(target).GetName(): stage.GetPrimAtPath(target)
+        for target in root.GetRelationship("isaac:physics:robotLinks").GetTargets()
+    }
+    poses = []
+    for name, pose in home["bodies"].items():
+        identifier = usdex.core.getValidPrimName(name)
+        if identifier not in links:
+            raise ValueError(f"Home body {name!r} is missing from the imported robot")
+        poses.append((links[identifier], pose))
+    # Parents precede children; read fresh authored USD transforms after each write.
+    # Source poses come from MuJoCo's named home keyframe, not a second FK solver.
+    for prim, pose in sorted(poses, key=lambda item: item[0].GetPath().pathElementCount):
+        w, x, y, z = pose["quaternion"]
+        world = Gf.Matrix4d(Gf.Matrix3d(Gf.Quatd(w, Gf.Vec3d(x, y, z))), Gf.Vec3d(*pose["position"]))
+        parent = UsdGeom.XformCache().GetLocalToWorldTransform(prim.GetParent())
+        transform = UsdGeom.Xformable(prim)
+        transform.MakeMatrixXform().Set(world * parent.GetInverse())
+        transform.SetResetXformStack(False)
+    cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    positions, rotations = [], []
+    for name, pose in home["bodies"].items():
+        identifier = usdex.core.getValidPrimName(name)
+        if identifier not in links:
+            raise ValueError(f"Home body {name!r} is missing from the imported robot")
+        matrix = cache.GetLocalToWorldTransform(links[identifier])
+        positions.append(float(np.max(np.abs(np.asarray(matrix.ExtractTranslation()) - pose["position"]))))
+        w, x, y, z = pose["quaternion"]
+        expected = Gf.Matrix3d(Gf.Quatd(w, Gf.Vec3d(x, y, z)))
+        rotations.append(float(np.max(np.abs(np.asarray(matrix.ExtractRotationMatrix()) - np.asarray(expected)))))
+    result = {
+        "method": "verified_mujoco_home_body_transforms",
+        "bodies_checked": len(positions),
+        "joints_applied": len(values),
+        "max_position_error_m": max(positions),
+        "max_rotation_matrix_error": max(rotations),
+        "position_tolerance_m": 2e-5,
+        "rotation_matrix_tolerance": 2e-5,
+    }
+    if result["max_position_error_m"] > 2e-5 or result["max_rotation_matrix_error"] > 2e-5:
+        raise ValueError(f"USD home pose differs from MuJoCo: {result}")
+    return result
 
 
 async def prepare_scene() -> None:
@@ -18,7 +92,7 @@ async def prepare_scene() -> None:
     from isaacsim.core.rendering_manager import ViewportManager
     from isaacsim.core.simulation_manager import PhysxScene, SimulationManager
     from omni.kit.viewport.utility import get_active_viewport
-    from pxr import Sdf, UsdLux, UsdPhysics
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics
 
     run = Path(os.environ["RELLING_STREAM_RUN"])
     source = Path(os.environ["RELLING_STREAM_SCENE"])
@@ -38,6 +112,10 @@ async def prepare_scene() -> None:
     if not opened:
         raise RuntimeError(f"Failed to open streaming session: {error}")
     stage = omni.usd.get_context().get_stage()
+    omni.timeline.get_timeline_interface().stop()
+    home_check = (
+        apply_home(stage, Path(os.environ["RELLING_STREAM_HOME"])) if os.environ.get("RELLING_STREAM_HOME") else None
+    )
     light = UsdLux.DomeLight.Define(stage, "/RellingViewer/Light")
     light.CreateIntensityAttr(900)
     physics_paths = [str(prim.GetPath()) for prim in stage.Traverse() if prim.IsA(UsdPhysics.Scene)]
@@ -52,10 +130,24 @@ async def prepare_scene() -> None:
         await app.next_update_async()
     omni.timeline.get_timeline_interface().stop()
     viewport = get_active_viewport()
-    ViewportManager.set_camera_view(str(viewport.camera_path), eye=[2.0, -2.0, 1.5], target=[0.3, -0.1, 0.6])
+    eye, target = [2.0, -2.0, 1.5], [0.3, -0.1, 0.6]
+    if home_check:
+        bounds = Gf.Range3d()
+        cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render"])
+        for prim in Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()):
+            if prim.IsA(UsdGeom.Gprim) and not prim.IsA(UsdGeom.Plane):
+                bounds.UnionWith(cache.ComputeWorldBound(prim).ComputeAlignedRange())
+        if bounds.IsEmpty() or not all(math.isfinite(value) for value in bounds.GetSize()):
+            raise ValueError("Imported cell has no finite visible geometry to frame")
+        target = list(bounds.GetMidpoint())
+        extent = max(bounds.GetSize())
+        eye = [target[index] + extent * offset for index, offset in enumerate((1.1, -1.4, 0.9))]
+    ViewportManager.set_camera_view(str(viewport.camera_path), eye=eye, target=target)
     for _ in range(60):
         await app.next_update_async()
     result = {"status": "ready", "source": str(source), "session": str(session_path), "timeline": "stopped"}
+    if home_check:
+        result["home_check"] = home_check
     (run / "scene-ready.json").write_text(json.dumps(result, indent=2) + "\n")
     print(f"Relling streaming scene ready: {session_path}", flush=True)
 

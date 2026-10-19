@@ -35,6 +35,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("start", "status", "stop"))
     parser.add_argument("--scene", type=Path)
+    parser.add_argument("--home", type=Path, help="Optional home.json emitted by catalog.py giza-source")
     parser.add_argument("--ip", help="Stallion's Tailscale IPv4 address")
     args = parser.parse_args()
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
@@ -55,12 +56,16 @@ def main() -> None:
         return
     if running:
         raise RuntimeError("This checkout already has an active streaming session; inspect status or stop it first")
+    if args.scene is None and args.home is None and state.get("home"):
+        args.home = Path(state["home"])
     args.scene = args.scene or (Path(state["scene"]) if state.get("scene") else None)
     args.ip = args.ip or state.get("ip")
     if not args.scene or not args.scene.is_file() or not args.ip:
         parser.error("Start requires an existing --scene and --ip")
     if ipaddress.ip_address(args.ip) not in ipaddress.ip_network("100.64.0.0/10"):
         parser.error("Use the host's private Tailscale IPv4 address")
+    if args.home and not args.home.is_file():
+        parser.error("--home must be an existing home-pose snapshot")
     guard = ["sudo", "-n", "nft"]
     if subprocess.run(
         guard + ["list", "table", "inet", "relling_isaac_stream"], capture_output=True, check=False
@@ -69,9 +74,17 @@ def main() -> None:
         subprocess.run(guard + ["-c", "-f", rules], check=True)
         subprocess.run(guard + ["-f", rules], check=True)
     for port in (49100, 8226):
-        with socket.socket() as check:
-            check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            check.bind(("127.0.0.1", port))
+        # Kit's child process can release its listeners shortly after the wrapper exits.
+        for attempt in range(20):
+            try:
+                with socket.socket() as check:
+                    check.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    check.bind(("127.0.0.1", port))
+                break
+            except OSError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.25)
     build = ROOT / "_build/linux-x86_64/release"
     libraries = sorted((build / "exts/isaacsim.pip.nv/pip_prebundle/nvidia").glob("*/lib"))
     if not libraries:
@@ -82,6 +95,9 @@ def main() -> None:
     env["LD_LIBRARY_PATH"] = ":".join(map(str, libraries)) + ":" + env.get("LD_LIBRARY_PATH", "")
     env["RELLING_STREAM_SCENE"] = str(args.scene.resolve())
     env["RELLING_STREAM_RUN"] = str(run)
+    env.pop("RELLING_STREAM_HOME", None)
+    if args.home:
+        env["RELLING_STREAM_HOME"] = str(args.home.resolve())
     command = [
         "bash",
         str(build / "isaac-sim.streaming.sh"),
@@ -109,6 +125,7 @@ def main() -> None:
         "run_dir": str(run),
         "ip": args.ip,
         "scene": str(args.scene.resolve()),
+        "home": str(args.home.resolve()) if args.home else None,
         "command": command,
     }
     STATE.write_text(json.dumps(state, indent=2) + "\n")
