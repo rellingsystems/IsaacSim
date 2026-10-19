@@ -117,7 +117,7 @@ def resolve_resource(source: Path, directory: str, filename: str) -> Path:
     return existing[0]
 
 
-def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict]]:
+def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], dict]:
     """Serialize a derived MJCF with absolute resources and supported legacy mesh files."""
     import mujoco
     from mujoco import msh2obj
@@ -163,11 +163,19 @@ def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict]]:
             original = texture.file
             texture.file = str(resolve_resource(source, texture.compiler.texturedir, original))
             changes.append({"kind": "texture", "original": original, "resolved": texture.file})
-    spec.compile()
+    model = spec.compile()
+    source_summary = {
+        "bodies": model.nbody,
+        "joints": model.njnt,
+        "dofs": model.nv,
+        "geometry": model.ngeom,
+        "actuators": model.nu,
+        "cameras": model.ncam,
+    }
     result = prepared / source.name
     result.write_text(spec.to_xml())
     write_json(prepared / "resource-references.json", changes)
-    return result, changes
+    return result, changes, source_summary
 
 
 def export_one(entry: dict) -> dict:
@@ -182,7 +190,7 @@ def export_one(entry: dict) -> dict:
     if destination.exists():
         destination = destination.with_name(f"{destination.name}_attempt_{time.time_ns()}")
     destination.mkdir(parents=True, exist_ok=False)
-    input_path, changes = prepare_source(source, destination)
+    input_path, changes, source_summary = prepare_source(source, destination)
     importer = MJCFImporter(
         MJCFImporterConfig(
             mjcf_path=str(input_path),
@@ -198,10 +206,17 @@ def export_one(entry: dict) -> dict:
     stage = Usd.Stage.Open(str(usd_path))
     if stage is None:
         raise RuntimeError("Importer output cannot be opened")
+    variants = stage.GetDefaultPrim().GetVariantSet("Physics")
+    if "physx" in variants.GetVariantNames():
+        variants.SetVariantSelection("physx")
+        stage.GetRootLayer().Save()
     prims = list(stage.Traverse())
     geometry = sum(prim.IsA(UsdGeom.Gprim) for prim in prims)
     if not geometry:
         raise RuntimeError("Imported stage contains no geometry")
+    joint_count = sum(prim.IsA(UsdPhysics.Joint) for prim in prims)
+    if source_summary["joints"] and not joint_count:
+        raise RuntimeError("Source has joints but exported PhysX stage has none")
     layers, assets, unresolved = UsdUtils.ComputeAllDependencies(Sdf.AssetPath(str(usd_path)))
     dependencies = [layer.realPath for layer in layers if layer.realPath] + list(assets)
     external = [str(path) for path in dependencies if path and not Path(path).resolve().is_relative_to(destination)]
@@ -215,13 +230,15 @@ def export_one(entry: dict) -> dict:
         "prim_count": len(prims),
         "geometry_count": geometry,
         "rigid_body_count": sum(prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in prims),
-        "joint_count": sum(prim.IsA(UsdPhysics.Joint) for prim in prims),
+        "joint_count": joint_count,
         "dependency_count": len(dependencies),
         "source_sha256": entry["sha256"],
         "physics_equivalence": "not_tested",
         "controller_port": "not_performed",
         "prepared_source": str(input_path),
         "resource_reference_count": len(changes),
+        "source_model_summary": source_summary,
+        "selected_physics_variant": variants.GetVariantSelection(),
     }
     del prims, stage, layers, importer
     gc.collect()
@@ -287,12 +304,15 @@ def run(args: argparse.Namespace, manifest: dict) -> None:
     output = Path(manifest["output_root"])
     (output / "results").mkdir(exist_ok=True)
     (output / "logs").mkdir(exist_ok=True)
-    if args.retry_failed:
+    if args.retry_failed or args.retry_exported:
         history = output / "results" / "history"
         history.mkdir(exist_ok=True)
         for record in (output / "results").glob("*.json"):
             result = json.loads(record.read_text())
-            if result.get("status") == "failed" and (
+            retry_statuses = ({"failed"} if args.retry_failed else set()) | (
+                {"exported"} if args.retry_exported else set()
+            )
+            if result.get("status") in retry_statuses and (
                 not args.match or any(term in result["source"] for term in args.match)
             ):
                 record.replace(history / f"{record.stem}-{time.time_ns()}.json")
@@ -394,6 +414,7 @@ def main() -> None:
             command.add_argument("--chunk-size", type=int, default=10)
             command.add_argument("--timeout", type=int, default=600)
             command.add_argument("--retry-failed", action="store_true")
+            command.add_argument("--retry-exported", action="store_true")
         elif name == "worker":
             command.add_argument("--ids", nargs="+", required=True)
     args = parser.parse_args()
