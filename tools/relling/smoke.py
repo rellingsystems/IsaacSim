@@ -20,7 +20,16 @@ def main() -> None:
 
     from isaacsim import SimulationApp
 
-    app = SimulationApp({"headless": True, "active_gpu": args.gpu, "physics_gpu": args.gpu, "multi_gpu": False})
+    app = SimulationApp(
+        {
+            "headless": True,
+            "active_gpu": args.gpu,
+            "physics_gpu": args.gpu,
+            "multi_gpu": False,
+            # Return from close so evidence is written only after clean teardown.
+            "fast_shutdown": False,
+        }
+    )
     try:
         # Kit must initialize before importing its extensions.
         import isaacsim.core.experimental.utils.app as app_utils
