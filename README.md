@@ -65,6 +65,13 @@ robot controllers, cameras, ROS, streaming, and performance require separate
 tests. A GPU request alone does not prove that the engine avoided CPU fallback;
 inspect `smoke.log` alongside the result before making that claim.
 
+Run custom Python scripts with `bash tools/relling/python.sh /absolute/path/to/script.py`.
+This wrapper puts the build's bundled NVIDIA runtime libraries ahead of older
+system CUDA libraries. Smoke uses it with `--no-ros-env` and launches from the
+release directory. This avoids a CUDA 12.0 system runtime shadowing the CUDA
+12.8 runtime needed by the pinned PyTorch build; the host CUDA installation is
+left intact.
+
 Each build or smoke attempt gets a fresh `_relling_runs/<id>-<action>/` with
 host inventory, source commit and dirty status, logs, an active PID file, and
 `acceptance.json`. Existing runs are never overwritten. The build deadline is

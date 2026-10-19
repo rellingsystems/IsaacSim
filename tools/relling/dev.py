@@ -82,11 +82,11 @@ def check_host(action: str, gpu: int) -> dict:
     return report
 
 
-def run_logged(command: list[str], log_path: Path, timeout: int) -> None:
+def run_logged(command: list[str], log_path: Path, timeout: int, *, cwd: Path = ROOT) -> None:
     """Run a process group with a deadline and retain its complete log."""
     print(f"Running: {' '.join(command)}\nLog: {log_path}", flush=True)
     with log_path.open("w") as log:
-        process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(command, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             return_code = process.wait(timeout=timeout)
         except (subprocess.TimeoutExpired, KeyboardInterrupt):
@@ -146,7 +146,8 @@ def main() -> int:
             run_logged(
                 [
                     "bash",
-                    str(launcher),
+                    str(ROOT / "tools/relling/python.sh"),
+                    "--no-ros-env",
                     str(ROOT / "tools/relling/smoke.py"),
                     "--output",
                     str(run_dir / "physics.json"),
@@ -155,6 +156,7 @@ def main() -> int:
                 ],
                 run_dir / "smoke.log",
                 600,
+                cwd=launcher.parent,
             )
             physics = json.loads((run_dir / "physics.json").read_text())
             if physics.get("status") != "passed":
