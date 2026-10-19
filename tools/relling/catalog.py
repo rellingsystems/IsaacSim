@@ -269,12 +269,37 @@ def validate_stage(usd_path: Path, destination: Path, source_summary: dict) -> d
             stage.GetRootLayer().Save()
             break
     prims = list(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
+
+    def is_dynamic_body(path: Sdf.Path) -> bool:
+        prim = stage.GetPrimAtPath(path)
+        while prim and not prim.IsPseudoRoot():
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                body = UsdPhysics.RigidBodyAPI(prim)
+                return body.GetRigidBodyEnabledAttr().Get() is not False and not body.GetKinematicEnabledAttr().Get()
+            prim = prim.GetParent()
+        return False
+
+    disabled_joints = []
+    for prim in prims:
+        if not prim.IsA(UsdPhysics.FixedJoint):
+            continue
+        joint = UsdPhysics.FixedJoint(prim)
+        targets = joint.GetBody0Rel().GetTargets() + joint.GetBody1Rel().GetTargets()
+        if targets and not any(is_dynamic_body(path) for path in targets):
+            # PhysX rejects fixed joints between world/static/kinematic actors. Such a joint
+            # adds no dynamic constraint and incorrectly anchors imported MuJoCo mocap markers.
+            joint.CreateJointEnabledAttr(False)
+            disabled_joints.append(str(prim.GetPath()))
+    stage.GetRootLayer().Save()
     geometry = sum(prim.IsA(UsdGeom.Gprim) for prim in prims)
     if not geometry:
         raise RuntimeError("Imported stage contains no geometry")
     joint_count = sum(prim.IsA(UsdPhysics.Joint) for prim in prims)
+    enabled_joint_count = sum(
+        prim.IsA(UsdPhysics.Joint) and UsdPhysics.Joint(prim).GetJointEnabledAttr().Get() is not False for prim in prims
+    )
     collision_count = sum(prim.HasAPI(UsdPhysics.CollisionAPI) for prim in prims)
-    if source_summary.get("articulated_joints", source_summary["joints"]) and not joint_count:
+    if source_summary.get("articulated_joints", source_summary["joints"]) and not enabled_joint_count:
         raise RuntimeError("Source has joints but exported physics stage has none")
     if source_summary.get("collision_geometry", 0) and not collision_count:
         raise RuntimeError("Source has collision geometry but exported physics stage has none")
@@ -289,6 +314,8 @@ def validate_stage(usd_path: Path, destination: Path, source_summary: dict) -> d
         "geometry_count": geometry,
         "rigid_body_count": sum(prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in prims),
         "joint_count": joint_count,
+        "enabled_joint_count": enabled_joint_count,
+        "disabled_redundant_fixed_joints": disabled_joints,
         "collision_count": collision_count,
         "dependency_count": len(dependencies),
         "selected_physics_variant": variants.GetVariantSelection(),
