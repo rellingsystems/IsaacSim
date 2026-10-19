@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import math
+import traceback
 from pathlib import Path
 
 
@@ -17,6 +19,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Output already exists")
+    faulthandler.dump_traceback_later(120, repeat=True)
 
     from isaacsim import SimulationApp
 
@@ -26,10 +29,9 @@ def main() -> None:
             "active_gpu": args.gpu,
             "physics_gpu": args.gpu,
             "multi_gpu": False,
-            # Return from close so evidence is written only after clean teardown.
-            "fast_shutdown": False,
         }
     )
+    exit_code = 0
     try:
         # Kit must initialize before importing its extensions.
         import isaacsim.core.experimental.utils.app as app_utils
@@ -81,10 +83,17 @@ def main() -> None:
             "render_calls": 8,
         }
         app_utils.stop()
+        with args.output.open("x") as output:
+            output.write(json.dumps(result, indent=2) + "\n")
+        print(f"Physics acceptance passed: final height {final_height:.6f} m", flush=True)
+    except BaseException:
+        # Kit may exit the process during close; retain the original test failure first.
+        traceback.print_exc()
+        exit_code = 1
+        raise
     finally:
-        app.close()
-    with args.output.open("x") as output:
-        output.write(json.dumps(result, indent=2) + "\n")
+        faulthandler.cancel_dump_traceback_later()
+        app.close(exit_code=exit_code)
 
 
 if __name__ == "__main__":

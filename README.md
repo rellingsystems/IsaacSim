@@ -72,6 +72,12 @@ release directory. This avoids a CUDA 12.0 system runtime shadowing the CUDA
 12.8 runtime needed by the pinned PyTorch build; the host CUDA installation is
 left intact.
 
+Kit also needs a user-writable `~/Documents/Kit` directory for its normal app
+data. This directory was created for Stallion's user because its parent
+`Documents` directory is owned by root. Smoke uses Kit's default fast shutdown;
+the controller requires a zero process exit, valid physics results, and no
+fatal error or traceback before it writes a passing acceptance record.
+
 Each build or smoke attempt gets a fresh `_relling_runs/<id>-<action>/` with
 host inventory, source commit and dirty status, logs, an active PID file, and
 `acceptance.json`. Existing runs are never overwritten. The build deadline is

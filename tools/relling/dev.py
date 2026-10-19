@@ -161,6 +161,11 @@ def main() -> int:
             physics = json.loads((run_dir / "physics.json").read_text())
             if physics.get("status") != "passed":
                 raise RuntimeError("Physics acceptance failed")
+            smoke_log = (run_dir / "smoke.log").read_text(errors="replace")
+            if any(
+                marker in smoke_log for marker in ("[Fatal]", "Fatal Python error", "Traceback (most recent call last)")
+            ):
+                raise RuntimeError("Fatal error or traceback in smoke log")
             result["physics"] = physics
         result["status"] = "passed"
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
