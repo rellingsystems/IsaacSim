@@ -177,6 +177,7 @@ def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], d
         "joints": model.njnt,
         "dofs": model.nv,
         "geometry": model.ngeom,
+        "collision_geometry": int(((model.geom_contype | model.geom_conaffinity) != 0).sum()),
         "actuators": model.nu,
         "cameras": model.ncam,
     }
@@ -186,10 +187,69 @@ def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], d
     return result, changes, source_summary
 
 
+def validate_stage(usd_path: Path, destination: Path, source_summary: dict) -> dict:
+    """Select available physics and inspect composed, instanced geometry and dependencies."""
+    from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdUtils
+
+    stage = Usd.Stage.Open(str(usd_path))
+    if stage is None:
+        raise RuntimeError("Importer output cannot be opened")
+    variants = stage.GetDefaultPrim().GetVariantSet("Physics")
+    for selection in ("physx", "physics"):
+        if selection in variants.GetVariantNames():
+            variants.SetVariantSelection(selection)
+            stage.GetRootLayer().Save()
+            break
+    prims = list(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
+    geometry = sum(prim.IsA(UsdGeom.Gprim) for prim in prims)
+    if not geometry:
+        raise RuntimeError("Imported stage contains no geometry")
+    joint_count = sum(prim.IsA(UsdPhysics.Joint) for prim in prims)
+    collision_count = sum(prim.HasAPI(UsdPhysics.CollisionAPI) for prim in prims)
+    if source_summary["joints"] and not joint_count:
+        raise RuntimeError("Source has joints but exported physics stage has none")
+    if source_summary.get("collision_geometry", 0) and not collision_count:
+        raise RuntimeError("Source has collision geometry but exported physics stage has none")
+    layers, assets, unresolved = UsdUtils.ComputeAllDependencies(Sdf.AssetPath(str(usd_path)))
+    dependencies = [layer.realPath for layer in layers if layer.realPath] + list(assets)
+    external = [str(path) for path in dependencies if path and not Path(path).resolve().is_relative_to(destination)]
+    if unresolved or external:
+        raise RuntimeError(f"USD dependencies are incomplete or external: unresolved={unresolved}, external={external}")
+    return {
+        "usd_path": str(usd_path),
+        "prim_count": len(prims),
+        "geometry_count": geometry,
+        "rigid_body_count": sum(prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in prims),
+        "joint_count": joint_count,
+        "collision_count": collision_count,
+        "dependency_count": len(dependencies),
+        "selected_physics_variant": variants.GetVariantSelection(),
+    }
+
+
+def audit_one(entry: dict, output: Path) -> dict:
+    """Create a physics-selected entry layer while preserving original export records and layers."""
+    import mujoco
+
+    result = json.loads((output / "results" / f"{entry['id']}.json").read_text())
+    source = Path(result["usd_path"])
+    target = source.with_name(f"{source.stem}.isaac-{time.time_ns()}{source.suffix}")
+    shutil.copy2(source, target)
+    model = mujoco.MjModel.from_xml_path(result["prepared_source"])
+    summary = dict(result["source_model_summary"])
+    summary["collision_geometry"] = int(((model.geom_contype | model.geom_conaffinity) != 0).sum())
+    return {
+        "status": "exported",
+        "audit": "passed",
+        "original_usd_path": str(source),
+        "source_model_summary": summary,
+        **validate_stage(target, Path(result["prepared_source"]).parent.parent, summary),
+    }
+
+
 def export_one(entry: dict) -> dict:
     """Convert one source without overrides and verify a nonempty, portable USD stage."""
     from isaacsim.asset.importer.mjcf import MJCFImporter, MJCFImporterConfig
-    from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdUtils
 
     source = Path(entry["source"])
     if digest(source) != entry["sha256"]:
@@ -232,45 +292,21 @@ def export_one(entry: dict) -> dict:
         )
     )
     usd_path = Path(importer.import_mjcf()).resolve()
-    stage = Usd.Stage.Open(str(usd_path))
-    if stage is None:
-        raise RuntimeError("Importer output cannot be opened")
-    variants = stage.GetDefaultPrim().GetVariantSet("Physics")
-    if "physx" in variants.GetVariantNames():
-        variants.SetVariantSelection("physx")
-        stage.GetRootLayer().Save()
-    prims = list(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
-    geometry = sum(prim.IsA(UsdGeom.Gprim) for prim in prims)
-    if not geometry:
-        raise RuntimeError("Imported stage contains no geometry")
-    joint_count = sum(prim.IsA(UsdPhysics.Joint) for prim in prims)
-    if source_summary["joints"] and not joint_count:
-        raise RuntimeError("Source has joints but exported PhysX stage has none")
-    layers, assets, unresolved = UsdUtils.ComputeAllDependencies(Sdf.AssetPath(str(usd_path)))
-    dependencies = [layer.realPath for layer in layers if layer.realPath] + list(assets)
-    external = [str(path) for path in dependencies if path and not Path(path).resolve().is_relative_to(destination)]
-    if unresolved or external:
-        raise RuntimeError(f"USD dependencies are incomplete or external: unresolved={unresolved}, external={external}")
+    validation = validate_stage(usd_path, destination, source_summary)
     if digest(source) != entry["sha256"]:
         raise RuntimeError("Source XML changed during export")
     result = {
         "status": "exported",
-        "usd_path": str(usd_path),
-        "prim_count": len(prims),
-        "geometry_count": geometry,
-        "rigid_body_count": sum(prim.HasAPI(UsdPhysics.RigidBodyAPI) for prim in prims),
-        "joint_count": joint_count,
-        "dependency_count": len(dependencies),
+        **validation,
         "source_sha256": entry["sha256"],
         "physics_equivalence": "not_tested",
         "controller_port": "not_performed",
         "prepared_source": str(input_path),
         "resource_reference_count": len(changes),
         "source_model_summary": source_summary,
-        "selected_physics_variant": variants.GetVariantSelection(),
         "notice_sources": license_sources,
     }
-    del prims, stage, layers, importer
+    del importer
     gc.collect()
     return result
 
@@ -294,12 +330,14 @@ def worker(args: argparse.Namespace, manifest: dict) -> None:
             result = {"id": entry["id"], "source": entry["source"], "status": "failed"}
             start = time.monotonic()
             try:
-                result.update(export_one(entry))
+                result.update(audit_one(entry, Path(manifest["output_root"])) if args.audit else export_one(entry))
             except Exception as error:  # noqa: BLE001 - isolate failures at the vendor model boundary
                 result["error"] = f"{type(error).__name__}: {error}"
                 traceback.print_exc()
             result["seconds"] = round(time.monotonic() - start, 3)
-            write_json(Path(manifest["output_root"]) / "results" / f"{entry['id']}.json", result)
+            write_json(
+                Path(manifest["output_root"]) / ("audits" if args.audit else "results") / f"{entry['id']}.json", result
+            )
             print(json.dumps(result), flush=True)
             omni.usd.get_context().new_stage()
             gc.collect()
@@ -321,7 +359,9 @@ def summarize(manifest: dict) -> dict:
             if result_path.exists()
             else {"status": "fragment" if entry["kind"] == "fragment" else "pending"}
         )
-        entries.append({**entry, **result})
+        audit_path = output / "audits" / f"{entry['id']}.json"
+        audit = json.loads(audit_path.read_text()) if audit_path.exists() else {}
+        entries.append({**entry, **result, **audit})
     counts = dict(collections.Counter(entry["status"] for entry in entries))
     summary = {"output_root": str(output), "counts": counts, "limitations": manifest["limitations"], "entries": entries}
     write_json(output / "catalog.json", summary)
@@ -333,6 +373,8 @@ def run(args: argparse.Namespace, manifest: dict) -> None:
     """Supervise serial chunks, retaining progress across a crash or deadline."""
     output = Path(manifest["output_root"])
     (output / "results").mkdir(exist_ok=True)
+    records = output / ("audits" if args.audit else "results")
+    records.mkdir(exist_ok=True)
     (output / "logs").mkdir(exist_ok=True)
     if args.retry_failed or args.retry_exported:
         history = output / "results" / "history"
@@ -346,11 +388,21 @@ def run(args: argparse.Namespace, manifest: dict) -> None:
                 not args.match or any(term in result["source"] for term in args.match)
             ):
                 record.replace(history / f"{record.stem}-{time.time_ns()}.json")
+                previous_audit = output / "audits" / record.name
+                if previous_audit.exists():
+                    previous_audit.replace(history / f"audit-{record.stem}-{time.time_ns()}.json")
     pending = [
         entry
         for entry in manifest["entries"]
         if entry["kind"] == "model"
-        and not (output / "results" / f"{entry['id']}.json").exists()
+        and not (records / f"{entry['id']}.json").exists()
+        and (
+            not args.audit
+            or (
+                (output / "results" / f"{entry['id']}.json").exists()
+                and json.loads((output / "results" / f"{entry['id']}.json").read_text()).get("status") == "exported"
+            )
+        )
         and (not args.match or any(term in entry["source"] for term in args.match))
     ]
     if args.limit:
@@ -386,6 +438,8 @@ def run(args: argparse.Namespace, manifest: dict) -> None:
                 "--ids",
                 *[e["id"] for e in chunk],
             ]
+            if args.audit:
+                command.append("--audit")
             print(f"Converting {len(chunk)} models; log: {log_path}", flush=True)
             with log_path.open("w") as log:
                 process = subprocess.Popen(
@@ -407,11 +461,11 @@ def run(args: argparse.Namespace, manifest: dict) -> None:
                     code = -1
                     if isinstance(error, KeyboardInterrupt):
                         raise
-            missing = [entry for entry in chunk if not (output / "results" / f"{entry['id']}.json").exists()]
+            missing = [entry for entry in chunk if not (records / f"{entry['id']}.json").exists()]
             if missing:
                 first, *remaining = missing
                 write_json(
-                    output / "results" / f"{first['id']}.json",
+                    records / f"{first['id']}.json",
                     {
                         "id": first["id"],
                         "source": first["source"],
@@ -438,6 +492,8 @@ def main() -> None:
     for name in ("run", "worker", "status"):
         command = commands.add_parser(name)
         command.add_argument("--manifest", type=Path, required=True)
+        if name in ("run", "worker"):
+            command.add_argument("--audit", action="store_true")
         if name == "run":
             command.add_argument("--match", action="append")
             command.add_argument("--limit", type=int)
