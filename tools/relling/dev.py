@@ -132,7 +132,7 @@ def main() -> int:
             run_logged(["git", "lfs", "install", "--local"], run_dir / "lfs-install.log", 60)
             run_logged(["git", "lfs", "pull"], run_dir / "lfs-pull.log", 1800)
             run_logged(
-                ["bash", "./build.sh", "--no-docker", "--release", "--jobs", str(args.jobs)],
+                ["bash", "./build.sh", "--release", "--jobs", str(args.jobs)],
                 run_dir / "build.log",
                 10800,
             )

@@ -53,8 +53,10 @@ python3 tools/relling/dev.py smoke --gpu 0
 ./_build/linux-x86_64/release/isaac-sim.sh
 ```
 
-Build uses the upstream external source-build path (`--no-docker --release`)
-and pulls Git LFS assets. Smoke launches the built checkout headlessly, requests
+Build uses the upstream source-build path (`--release --jobs 2`) and pulls
+Git LFS assets. This baseline disables Docker in `repo.toml`; its build parser
+does not accept `--no-docker` despite older build notes mentioning that flag.
+Smoke launches the built checkout headlessly, requests
 single-GPU PhysX, renders eight frames, and requires a procedural 0.5 m cube
 to fall from 2 m and settle at 0.25 m on a floor over 240 physics steps. It does
 not require remote robot assets. This proves basic initialization and physics;
