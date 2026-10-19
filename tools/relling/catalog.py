@@ -212,6 +212,14 @@ def export_one(entry: dict) -> dict:
                 license_sources.append(str(notice))
             break
     input_path, changes, source_summary = prepare_source(source, destination)
+    if not source_summary["geometry"]:
+        return {
+            "status": "fragment",
+            "reason": "Compiled MJCF contains no standalone geometry",
+            "source_model_summary": source_summary,
+            "source_sha256": entry["sha256"],
+            "prepared_source": str(input_path),
+        }
     importer = MJCFImporter(
         MJCFImporterConfig(
             mjcf_path=str(input_path),
