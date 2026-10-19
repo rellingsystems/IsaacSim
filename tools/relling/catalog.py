@@ -177,6 +177,11 @@ def prepare_source(source: Path, destination: Path) -> tuple[Path, list[dict], d
             original = texture.file
             texture.file = str(resolve_resource(source, texture.compiler.texturedir, original))
             changes.append({"kind": "texture", "original": original, "resolved": texture.file})
+    for heightfield in spec.hfields:
+        if heightfield.file:
+            original = heightfield.file
+            heightfield.file = str(resolve_resource(source, "", original))
+            changes.append({"kind": "heightfield", "original": original, "resolved": heightfield.file})
     model = spec.compile()
     source_summary = {
         "bodies": model.nbody,
