@@ -239,7 +239,7 @@ def export_one(entry: dict) -> dict:
     if "physx" in variants.GetVariantNames():
         variants.SetVariantSelection("physx")
         stage.GetRootLayer().Save()
-    prims = list(stage.Traverse())
+    prims = list(Usd.PrimRange(stage.GetPseudoRoot(), Usd.TraverseInstanceProxies()))
     geometry = sum(prim.IsA(UsdGeom.Gprim) for prim in prims)
     if not geometry:
         raise RuntimeError("Imported stage contains no geometry")
