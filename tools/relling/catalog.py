@@ -112,6 +112,14 @@ def resolve_resource(source: Path, directory: str, filename: str) -> Path:
         parts.pop(0)
     candidates = {(parent / Path(*parts)).resolve() for parent in source.parents}
     existing = [path for path in candidates if path.is_file()]
+    if not existing:
+        # Retain at least a directory and filename when relocating author-machine paths.
+        for offset in range(1, len(parts) - 1):
+            suffix = Path(*parts[offset:])
+            candidates = {(parent / suffix).resolve() for parent in source.parents}
+            existing = [path for path in candidates if path.is_file()]
+            if existing:
+                break
     if len(existing) != 1:
         raise FileNotFoundError(f"Resource {reference} has {len(existing)} unambiguous relocation candidates")
     return existing[0]
